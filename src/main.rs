@@ -165,14 +165,39 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Proton TCP configs ship `up/down /etc/openvpn/update-resolv-conf`
+/// (Debian-only, missing on Arch). We manage routes ourselves via table 100
+/// and don't want pushed DNS touching system resolv.conf, so strip those
+/// lines via a temp copy — the originals stay untouched.
+fn sanitized_config(cfg: &std::path::Path) -> Result<PathBuf, String> {
+    let content = std::fs::read_to_string(cfg)
+        .map_err(|e| format!("cannot read {}: {e}", cfg.display()))?;
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("up ") || t.starts_with("down ") || t == "up" || t == "down" {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "open-switch-{}.ovpn",
+        cfg.file_stem().and_then(|s| s.to_str()).unwrap_or("vpn")
+    ));
+    std::fs::write(&tmp, out).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    Ok(tmp)
+}
+
 /// Launch supervised openvpn for cfg; waits for tun0 (kills child on timeout).
 /// --http-proxy rides on the CLI so any stock TCP config tunnels via Tor untouched.
-fn vpn_spawn(cfg: &std::path::Path) -> Result<Child, String> {
-    let dir = cfg.parent().unwrap_or(std::path::Path::new("."));
+fn vpn_spawn(orig: &std::path::Path) -> Result<Child, String> {
+    let dir = orig.parent().unwrap_or(std::path::Path::new("."));
     let auth = dir.join("auth.txt");
     if !auth.is_file() {
-        return Err(format!("auth.txt not found next to {}", cfg.display()));
+        return Err(format!("auth.txt not found next to {}", orig.display()));
     }
+    let cfg = sanitized_config(orig)?;
     let log = dir.join("openvpn.log");
     let mut child = Command::new("openvpn")
         .arg("--config")
