@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use clap_repl::ClapEditor;
+use clap_repl::{reedline::FileBackedHistory, ClapEditor};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket};
 
@@ -43,8 +43,6 @@ enum Cmd {
         /// Directory to pick a random config from
         dir: String,
     },
-    /// Stop everything and quit
-    Exit,
 }
 
 #[derive(Default)]
@@ -698,18 +696,27 @@ fn do_switch(state: &Arc<Mutex<ProxyState>>, cfg: &std::path::Path) {
 async fn main() {
     let rt = tokio::runtime::Handle::current();
     let state = Arc::new(Mutex::new(ProxyState::default()));
-    println!("commands: start | stop | status | switch [config] | switch-random <dir> | exit  (proxy: {LISTEN_ADDR})");
+    println!("commands: start | stop | status | switch [config] | switch-random <dir>  (proxy: {LISTEN_ADDR}, Ctrl-D to quit)");
     let st = state.clone();
-    ClapEditor::<Cli>::builder().build().repl(move |cli| match cli.cmd {
-        Cmd::Start { config } => cmd_start(&st, &rt, config),
-        Cmd::Stop => cmd_stop(&st),
-        Cmd::Status => cmd_status(&st),
-        Cmd::Switch { config } => cmd_switch(&st, config),
-        Cmd::SwitchRandom { dir } => cmd_switch_random(&st, dir),
-        Cmd::Exit => {
-            cmd_stop(&st);
-            std::process::exit(0);
-        }
-    });
+    ClapEditor::<Cli>::builder()
+        .with_editor_hook(|rl| {
+            match history_file().and_then(|f| FileBackedHistory::with_file(1000, f).ok()) {
+                Some(h) => rl.with_history(Box::new(h)),
+                None => rl,
+            }
+        })
+        .build()
+        .repl(move |cli| match cli.cmd {
+            Cmd::Start { config } => cmd_start(&st, &rt, config),
+            Cmd::Stop => cmd_stop(&st),
+            Cmd::Status => cmd_status(&st),
+            Cmd::Switch { config } => cmd_switch(&st, config),
+            Cmd::SwitchRandom { dir } => cmd_switch_random(&st, dir),
+        });
     cmd_stop(&state); // Ctrl-D: leave no routes behind
+}
+
+/// History file so repl history survives restarts (`~/.vpn-proxy-history`).
+fn history_file() -> Option<PathBuf> {
+    std::env::home_dir().map(|h| PathBuf::from(h).join(".vpn-proxy-history"))
 }
